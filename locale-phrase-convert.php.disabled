@@ -1,0 +1,138 @@
+<?php
+/**
+ * Plugin Name: Locale Phrase Convert
+ * Description: OpenCC Taiwan/Mainland phrase conversion (s2twp / tw2sp), including post content.
+ * Version: 1.2.0
+ *
+ * @package LocalePhraseConvert
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+define( 'LOCALE_PHRASE_CONVERT_VERSION', '1.2.1' );
+define( 'LOCALE_PHRASE_CONVERT_COOKIE', 'pk_lang' );
+
+/**
+ * Turn on Puock's language toggle so the nav control is available.
+ *
+ * @param mixed $config Theme option array.
+ * @return mixed
+ */
+function localePhraseConvertEnablePuockToggle( $config ) {
+	if ( ! is_array( $config ) ) {
+		return $config;
+	}
+	$config['cn_sc_tc_toggle'] = true;
+	return $config;
+}
+
+add_filter( 'option_puock_options', 'localePhraseConvertEnablePuockToggle' );
+
+/**
+ * Guess Taiwan-phrase locale from Accept-Language when the visitor has no cookie yet.
+ */
+function localePhraseConvertMaybeSetDefaultCookie() {
+	if ( is_admin() || headers_sent() ) {
+		return;
+	}
+	if ( isset( $_COOKIE[ LOCALE_PHRASE_CONVERT_COOKIE ] ) ) {
+		return;
+	}
+
+	$acceptLanguage = isset( $_SERVER['HTTP_ACCEPT_LANGUAGE'] ) ? (string) $_SERVER['HTTP_ACCEPT_LANGUAGE'] : '';
+	if ( $acceptLanguage === '' ) {
+		return;
+	}
+	if ( ! preg_match( '/zh[-_](TW|HK|MO|Hant)/i', $acceptLanguage ) ) {
+		return;
+	}
+
+	$cookiePath = defined( 'COOKIEPATH' ) && COOKIEPATH !== '' ? COOKIEPATH : '/';
+	$set        = setcookie(
+		LOCALE_PHRASE_CONVERT_COOKIE,
+		'tc',
+		array(
+			'expires'  => time() + YEAR_IN_SECONDS,
+			'path'     => $cookiePath,
+			'secure'   => is_ssl(),
+			'httponly' => false,
+			'samesite' => 'Lax',
+		)
+	);
+	if ( $set !== true ) {
+		error_log( 'Locale phrase convert: failed to set pk_lang cookie for Taiwan Accept-Language.' );
+		return;
+	}
+	$_COOKIE[ LOCALE_PHRASE_CONVERT_COOKIE ] = 'tc';
+}
+
+add_action( 'send_headers', 'localePhraseConvertMaybeSetDefaultCookie', 1 );
+
+require_once __DIR__ . '/locale-phrase-convert/compile-user-dicts.php';
+
+/**
+ * Replace Puock's OpenCC 1.0.5 (cn→tw glyphs only) with 1.4.1 plus phrase dictionaries.
+ */
+function localePhraseConvertEnqueueScripts() {
+	if ( is_admin() ) {
+		return;
+	}
+
+	$baseDir    = WPMU_PLUGIN_DIR . '/locale-phrase-convert';
+	$openCcPath = $baseDir . '/opencc-full.min.js';
+	$dictsPath  = $baseDir . '/custom-phrases.js';
+	$patchPath  = $baseDir . '/convert-patch.js';
+	$userPath   = $baseDir . '/user-phrases.js';
+	if ( ! is_readable( $openCcPath ) || ! is_readable( $dictsPath ) || ! is_readable( $patchPath ) ) {
+		error_log( 'Locale phrase convert: OpenCC, phrase table, or patch script is not readable.' );
+		return;
+	}
+
+	localePhraseConvertCompileUserPhrases( $baseDir . '/dicts', $userPath );
+
+	$baseUrl = WPMU_PLUGIN_URL . '/locale-phrase-convert';
+
+	wp_deregister_script( 'puock-opencc' );
+	wp_register_script( 'puock-opencc', $baseUrl . '/opencc-full.min.js', array(), '1.4.1', true );
+	wp_enqueue_script( 'puock-opencc' );
+
+	$dictDeps = array( 'puock-opencc' );
+	wp_enqueue_script(
+		'locale-phrase-dicts',
+		$baseUrl . '/custom-phrases.js',
+		$dictDeps,
+		LOCALE_PHRASE_CONVERT_VERSION,
+		true
+	);
+	$patchDeps = array( 'puock-opencc', 'locale-phrase-dicts' );
+	if ( is_readable( $userPath ) ) {
+		wp_enqueue_script(
+			'locale-phrase-user-dicts',
+			$baseUrl . '/user-phrases.js',
+			array( 'locale-phrase-dicts' ),
+			(string) filemtime( $userPath ),
+			true
+		);
+		$patchDeps[] = 'locale-phrase-user-dicts';
+	}
+
+	wp_enqueue_script(
+		'locale-phrase-convert',
+		$baseUrl . '/convert-patch.js',
+		$patchDeps,
+		LOCALE_PHRASE_CONVERT_VERSION,
+		true
+	);
+
+	$scripts = wp_scripts();
+	if ( isset( $scripts->registered['puock'] ) && is_array( $scripts->registered['puock']->deps ) ) {
+		if ( ! in_array( 'locale-phrase-convert', $scripts->registered['puock']->deps, true ) ) {
+			$scripts->registered['puock']->deps[] = 'locale-phrase-convert';
+		}
+	}
+}
+
+add_action( 'wp_enqueue_scripts', 'localePhraseConvertEnqueueScripts', 20 );
+
